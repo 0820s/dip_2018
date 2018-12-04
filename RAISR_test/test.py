@@ -54,6 +54,7 @@ imagecount = 1
 for image in imagelist:
     print('\rUpscaling image ' + str(imagecount) + ' of ' + str(len(imagelist)) + ' (' + image + ')')
     img = cv2.imread(image)
+    # I think resize should be carried out first... you don't have a low resolution image in real situation, so you can't utilize other two channels of high resolution images
     # Extract only the luminance in YCbCr
     ycrcvorigin = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
     grayorigin = ycrcvorigin[:,:,0]
