@@ -15,11 +15,11 @@ def upscale(name):
     __device__ void hashkey(float block[9][9],int Qangle,float*weight,int*r)
     {
         int i,j,k;
-        float gy[9*9];
+        float gy[81];
         for(j=0;j<9;j++)
         {
             gy[j]=block[1][j]-block[0][j];
-            gy[8*9+j]=block[8][j]-block[7][j];
+            gy[72+j]=block[8][j]-block[7][j];
         }
           
         for(i=1;i<8;i++){
@@ -28,11 +28,11 @@ def upscale(name):
                 }
         }   
               
-        float gx[9*9];
+        float gx[81];
         for(i=0;i<9;i++)
         {
             gx[i]=block[i][1]-block[i][0];
-            gx[8*9+i]=block[i][8]-block[i][7];
+            gx[72+i]=block[i][8]-block[i][7];
         }
           
         for(i=0;i<9;i++){
@@ -136,21 +136,28 @@ def upscale(name):
         
     __global__ void patch_up(float *predictHR, float *a, float *h,float *w,float*shape)
     {
+        int height=(int)shape[0];
+        int width=(int)shape[1];
         int i = 5+blockIdx.x * blockDim.x + threadIdx.x; 
         int j = 5+blockIdx.y * blockDim.y + threadIdx.y;
+        if(i>=height-5 || j>=width-5)
+        {
+                return;
+        }
+        
         float patch[121];
         int row,col;
-        int weight=(int)shape[1];
+        
         for(row=0;row<11;row++){
                 for(col=0;col<11;col++){
-                        patch[row*11+col]=a[(i-5+row)*weight+(j-5+col)];
+                        patch[row*11+col]=a[(i-5+row)*width+(j-5+col)];
                 }
         }        
     
         float block[9][9];
         for(row=0;row<9;row++){
                 for(col=0;col<9;col++){
-                        block[row][col]=a[(i-4+row)*weight+j-4+col];
+                        block[row][col]=a[(i-4+row)*width+j-4+col];
                 }
         }
         
@@ -158,12 +165,14 @@ def upscale(name):
         hashkey(block, 24, w,r);
         int pixeltype = ((i-5) % 2) * 2 + ((j-5) % 2);
         float hh[121];
+        int hUsed=r[0]*36*121+r[1]*12*121+r[2]*4*121+pixeltype*121;
         for(row=0;row<121;row++){
-                hh[row]=h[r[0]*36*121+r[1]*12*121+r[2]*4*121+pixeltype*121+row];
+                hh[row]=h[hUsed+row];
         }
-    
+        
+        int position=(i-5)*(width-10)+j-5;
         for(row=0;row<121;row+=1){
-                predictHR[(i-5)*(weight-10)+j-5]+=patch[row]*hh[row];
+                predictHR[position]+=patch[row]*hh[row];
         }
             
     }
@@ -176,18 +185,19 @@ def upscale(name):
     
     weighting = gaussian2d([gradientsize, gradientsize], 2)
     weighting = np.diag(weighting.ravel())#81*81
+    #with open("filter_BSDS500", "rb") as fp:
+        #h = pickle.load(fp)
+    #h=np.array(h)
     h=np.load('filter.npy')
     
     img = cv2.imread('./static/' + name)
     size = img.shape
-    origin = cv2.resize(img,(size[1]/2,size[0]/2),cv2.INTER_LINEAR)
-    cv2.imwrite('./static/LR_' + name, origin)
-    # Extract only the luminance in YCbCr
+    origin = cv2.resize(img,(int(size[1]/2),int(size[0]/2)),cv2.INTER_LINEAR)
+    #cv2.imwrite('./static/LR_' + name, origin)
+
     ycrcvorigin = cv2.cvtColor(origin, cv2.COLOR_BGR2YCrCb)
     grayorigin = ycrcvorigin[:,:,0]
-    # Normalized to [0,1]
     grayorigin = cv2.normalize(grayorigin.astype('float'), None, grayorigin.min()/255, grayorigin.max()/255, cv2.NORM_MINMAX)
-    # Upscale (bilinear interpolation)
     heightLR, widthLR = grayorigin.shape
     heightgridLR = np.linspace(0,heightLR-1,heightLR)
     widthgridLR = np.linspace(0,widthLR-1,widthLR)
@@ -195,7 +205,6 @@ def upscale(name):
     heightgridHR = np.linspace(0,heightLR-0.5,heightLR*2)
     widthgridHR = np.linspace(0,widthLR-0.5,widthLR*2)
     upscaledLR = bilinearinterp(widthgridHR, heightgridHR).astype(np.float32)
-    # Calculate predictHR pixels
     heightHR, widthHR = upscaledLR.shape
 
     upscaledLR=upscaledLR.reshape((heightHR*widthHR))
@@ -203,28 +212,44 @@ def upscale(name):
     h=h.reshape((24*3*3*4*121)).astype(np.float32)
     weighting = weighting.astype(np.float32).reshape((81*81))
     patch_up = mod.get_function("patch_up")
-    grid1=(heightHR-2*margin)/16
-    grid2=(widthHR-2*margin)/16
+    grid1=int((heightHR-2*margin)/16)+1
+    grid2=int((widthHR-2*margin)/16)+1
     shape=np.array([heightHR, widthHR]).astype(np.float32)
     
     patch_up(drv.Out(predictHR), drv.In(upscaledLR), drv.In(h),drv.In(weighting),drv.In(shape),grid=(grid1,grid2),block=(16,16,1))
     ctx.pop()
-    # Scale back to [0,255]
+    
     predictHR=predictHR.reshape((heightHR-2*margin),(widthHR-2*margin))
     upscaledLR=upscaledLR.reshape((heightHR,widthHR))
     predictHR = np.clip(predictHR.astype('float') * 255., 0., 255.)
-    # Bilinear interpolation on CbCr field
-    result = np.zeros((heightHR, widthHR, 3))
+
+    result = np.zeros((heightHR-2*margin, widthHR-2*margin, 3))
+    resultBLI = np.zeros((heightHR-2*margin, widthHR-2*margin, 3))
     y = ycrcvorigin[:,:,0]
     bilinearinterp = interpolate.interp2d(widthgridLR, heightgridLR, y, kind='linear')
-    result[:,:,0] = bilinearinterp(widthgridHR, heightgridHR)
+    resultBLI[:,:,0] = bilinearinterp(widthgridHR, heightgridHR)[margin:heightHR-margin,margin:widthHR-margin]
+
     cr = ycrcvorigin[:,:,1]
     bilinearinterp = interpolate.interp2d(widthgridLR, heightgridLR, cr, kind='linear')
-    result[:,:,1] = bilinearinterp(widthgridHR, heightgridHR)
+    result[:,:,1] = bilinearinterp(widthgridHR, heightgridHR)[margin:heightHR-margin,margin:widthHR-margin]
     cv = ycrcvorigin[:,:,2]
     bilinearinterp = interpolate.interp2d(widthgridLR, heightgridLR, cv, kind='linear')
-    result[:,:,2] = bilinearinterp(widthgridHR, heightgridHR)
-    result[margin:heightHR-margin,margin:widthHR-margin,0] = predictHR
+    result[:,:,2] = bilinearinterp(widthgridHR, heightgridHR)[margin:heightHR-margin,margin:widthHR-margin]
+    result[:,:,0] = predictHR
+    resultBLI[:,:,1:]=result[:,:,1:]
     result = cv2.cvtColor(np.uint8(result), cv2.COLOR_YCrCb2RGB)
+    '''
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], np.float32)
+    result = cv2.filter2D(result, -1, kernel=kernel)
+    '''
+    resultBLI = cv2.cvtColor(np.uint8(resultBLI), cv2.COLOR_YCrCb2RGB)
     cv2.imwrite('./static/HR_' + name, cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+    cv2.imwrite('./static/BLI_' + name, cv2.cvtColor(resultBLI, cv2.COLOR_RGB2BGR))
+    if widthHR>heightHR:
+        w=800
+        h=int((heightHR-2*margin)/((widthHR-2*margin)/800))
+    else:
+        h=600
+        w=int((widthHR-2*margin)/((heightHR-2*margin)/600))
+    return h,w
 
